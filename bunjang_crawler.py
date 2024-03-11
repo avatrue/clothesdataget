@@ -1,56 +1,21 @@
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.support.ui import WebDriverWait
-from bs4 import BeautifulSoup
 import json
-import datetime
+from playwright.sync_api import sync_playwright
 import re
+import datetime
 
-# 웹 드라이버 초기화
-def initialize_browser():
-    browser = webdriver.Chrome()
-    browser.implicitly_wait(10)
-    return browser
+def load_brands(file_path):
+    with open(file_path, 'r', encoding='utf-8') as file:
+        brands = json.load(file)
+    return brands
 
-# 페이지 HTML 가져오기
-def get_page_html(browser, url):
-    browser.get(url)
-    WebDriverWait(browser, 10).until(EC.visibility_of_element_located((By.CLASS_NAME, "app")))
-    return browser.page_source
-# 제품정보 추출 함수 정의
-# 제품 상세페이지로부터 카테고리 번호 추출 함수
-def extract_product_details(product_id,browser):
-    try:
-        # 상세페이지로 이동
-        details_url = f"https://m.bunjang.co.kr/products/{product_id}"
-        browser.get(details_url)
+def check_brand_in_title(title, primary_brand_name, alternative_brand_name):
+    title = re.sub(r"\s+", "", title).lower()
+    primary_brand_name = re.sub(r"\s+", "", primary_brand_name).lower()
+    if alternative_brand_name:
+        alternative_brand_name = re.sub(r"\s+", "", alternative_brand_name).lower()
 
-        # 상세페이지의 내용을 기다린 후, 파싱
-        WebDriverWait(browser, 10).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, "a[href*='/categories/']"))
-        )
-        details_html = browser.page_source
-        details_parser = BeautifulSoup(details_html, 'html.parser')
+    return primary_brand_name in title or alternative_brand_name in title if alternative_brand_name else False
 
-        # 카테고리 링크 추출
-        category_link_tag = details_parser.find('a', href=re.compile(r'/categories/\d+'))
-        if category_link_tag and 'href' in category_link_tag.attrs:
-            category_href = category_link_tag['href']
-            category_number = re.search(r'/categories/(\d+)', category_href).group(1)
-            print(f"Extracted category number: {category_number}")  # 디버깅을 위한 출력
-            browser.back()
-            return category_number
-        else:
-            print("Category number not found.")  # 디버깅을 위한 출력
-            browser.back()
-            return None
-    except Exception as e:
-        print(f"An error occurred: {e}")
-        browser.back()
-        return None
-
-# 시간 변환 함수
 def convert_time(time_str):
     current_time = datetime.datetime.now()
     numbers = re.findall(r'\d+', time_str)
@@ -63,148 +28,113 @@ def convert_time(time_str):
     elif '주 전' in time_str:
         return (current_time - datetime.timedelta(weeks=number)).strftime('%Y-%m-%d')
     elif '달 전' in time_str:
-
         return (current_time - datetime.timedelta(days=number * 30)).strftime('%Y-%m-%d')
     elif '년 전' in time_str:
         return current_time.replace(year=current_time.year - number).strftime('%Y-%m-%d')
     return current_time.strftime('%Y-%m-%d')
-# 카테고리 ID 처리
+
 def process_category_id(cat_id):
-    # 카테고리 ID를 3개의 부분으로 분리
     parts = re.findall('...', cat_id)
-    # 분리된 부분이 없는 경우 0으로 채움
     parts += ['0'] * (3 - len(parts))
-    return tuple(parts[:3])  # 최대 3개의 카테고리 ID 반환
-# 메인 함수
-def main():
-    # 사용자 입력 처리
-    item_name = input("검색어 입력 : ")
-    pages = input("몇 페이지까지 조회할까요? (모든 페이지를 조회하려면 'all'을 입력) : ")
-    category_id = input("카테고리 ID 입력 (3, 6, 또는 9자리): ")
+    return tuple(parts[:3])
 
-    # Selenium 구동
-    browser = initialize_browser()
-    browser.get('https://m.bunjang.co.kr/')
-
-    # 데이터 수집 로직
-    # 큰 카테고리, 중간 카테고리, 작은 카테고리 추출
-    big_category, mid_category, small_category = process_category_id(category_id)
-
-    # 수집한 데이터를 저장할 리스트
+def bunjang_crawler(brand_name, alternative_brand_name, category_id):
     data_list = []
-
-    # 이전 페이지의 제품 ID를 저장할 변수
     previous_product_ids = None
+    page_num = 1
 
-    # 페이지 순환을 위한 설정
-    page = 1
-    is_last_page = False
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page()
 
-    while not is_last_page:
-        url = f"https://m.bunjang.co.kr/search/products?category_id={category_id}&order=date&page={page}&q={item_name}"
-        browser.get(url)
-        WebDriverWait(browser, 10).until(EC.visibility_of_element_located((By.CLASS_NAME, "app")))
-        html = browser.page_source
-        html_parser = BeautifulSoup(html, features="html.parser")
-        product_list = html_parser.find_all(attrs={'alt': '상품 이미지'})
+        while True:
+            url = f"https://m.bunjang.co.kr/search/products?category_id={category_id}&order=date&page={page_num}&q={brand_name}"
+            print(url)  # 추가된 코드
+            page.goto(url)
+            product_list = page.query_selector_all('img[alt="상품 이미지"]')
+            print(len(product_list))
+            if not product_list:
+                print(f"No more products found. Ending the search.")
+                break
 
-        if not product_list or (pages.isdigit() and page > int(pages)):
-            print(f"No products found on page {page}. Ending the search.")
-            break
+            current_product_ids = []
 
-        # 현재 페이지의 제품 ID를 저장할 리스트
-        current_product_ids = []
+            for item in product_list:
+                aTag = item.query_selector('xpath=ancestor::a')
+                if aTag:
+                    product_id = aTag.get_attribute('data-pid')
+                    infor = aTag.query_selector('div').inner_text().split(';;;')
 
-        # 제품정보 추출
-        for item in product_list:
-            aTag = item.parent.parent
-            product_id = aTag.get('data-pid')
-            for i, c in enumerate(aTag.children, 0):
-                if i == 1:
-                    infor = c.get_text(separator=';;;').split(sep=';;;')
+                    if not check_brand_in_title(infor[0], brand_name, alternative_brand_name):
+                        continue
 
-            title = infor[0]
-            if item_name.lower() not in title.lower():
-                continue  # 검색어가 제목에 없으면 이 제품은 건너뛰기
-            # 제품넘버 추출
-            if product_id:
-                current_product_ids.append(product_id)
-            if product_id == None:
-                continue
+                    if product_id:
+                        current_product_ids.append(product_id)
+                    if product_id is None:
+                        continue
 
-            # 이미지 링크 추출
-            image_tag = aTag.find('img', {'alt': '상품 이미지'})
-            image_link = image_tag.get('src') if image_tag else None
+                    image_link = item.get_attribute('src')
 
+                    status_tag = aTag.query_selector('img[alt*="예약중"], img[alt*="판매 완료"]')
+                    status = 0 if status_tag else 1
 
-            # 판매 상태 확인
-            status_tag = aTag.find('img', alt=lambda x: x and ('예약중' in x or '판매 완료' in x))
-            status = 0 if status_tag else 1
-            if status == 1:
-                # 카테고리 넘버 뽑기
-                category_number = extract_product_details(product_id,browser)
-                big_category, mid_category, small_category = process_category_id(category_number)
+                    raw_time = infor[2] if len(infor) > 2 else "미 확인"
+                    converted_time = convert_time(raw_time) if raw_time != "미 확인" else raw_time
 
-            # 시간 값 변환
-            raw_time = infor[2] if len(infor) > 2 else "미 확인"
-            converted_time = convert_time(raw_time) if raw_time != "미 확인" else raw_time
+                    raw_price = infor[1] if len(infor) > 1 else "0"
+                    cleaned_price = ''.join(filter(str.isdigit, raw_price.replace(',', '')))
 
-            # 가격 값 변환
-            raw_price = infor[1] if len(infor) > 1 else "0"
-            if "연락요망" in raw_price:
-                continue  # "연락요망"이 포함되어 있으면 이 제품은 건너뛰기
+                    if cleaned_price:
+                        converted_price = int(cleaned_price)
+                    else:
+                        print(f"Could not convert price for product_id {product_id}: {raw_price}")
+                        converted_price = 0
 
-            converted_price = int(raw_price.replace(',', ''))
+                    big_category, mid_category, small_category = process_category_id(category_id)
 
-            try:
-                product_data = {
-                    "brand": item_name,
-                    "product_id": product_id,
-                    "title": infor[0],
-                    "price": converted_price,
-                    "time": converted_time,
-                    "link": f"https://m.bunjang.co.kr/products/{product_id}",
-                    "status": status,
-                    "image_link": image_link,
-                    "category": {
-                        "big_category": big_category,
-                        "mid_category": mid_category,
-                        "small_category": small_category}
-                }
-                data_list.append(product_data)
-            except Exception as e:
-                print("Error:", e)
-        # 현재 페이지와 이전 페이지의 제품 ID 목록 비교
-        if previous_product_ids is not None and previous_product_ids == current_product_ids:
-            print(f"Reached the last page with new products at page {page}.")
-            break
+                    product_data = {
+                        "product_id": int(product_id),
+                        "brand": [brand_name],
+                        "title": infor[0],
+                        "price_history": [converted_price],
+                        "link": f"https://m.bunjang.co.kr/products/{product_id}",
+                        "status": status,
+                        "image_link": image_link,
+                        "time": converted_time,
+                        "category": {
+                            "big": int(big_category) if big_category.isdigit() else big_category,
+                            "mid": int(mid_category) if mid_category.isdigit() else mid_category,
+                            "small": int(small_category) if small_category.isdigit() else small_category
+                        }
+                    }
+                    data_list.append(product_data)
+                else:
+                    print(f"Could not find ancestor <a> tag for product.")
+                    continue
 
-        # 이전 페이지의 제품 ID 목록 업데이트
-        previous_product_ids = current_product_ids
-        page += 1
+            if previous_product_ids is not None and previous_product_ids == current_product_ids:
+                print(f"Reached the last page with new products at page {page_num}.")
+                break
 
-        # 마지막 페이지라면 종료
-        if pages.isdigit() and page > int(pages):
-            break
+            previous_product_ids = current_product_ids
+            page_num += 1
 
+        browser.close()
 
+    return data_list
+def main(brand_file_path, category_id):
+    brands = load_brands(brand_file_path)
+    print(brands)
+    for brand_name, alternative_brand_name in brands.items():
+        data_list = bunjang_crawler(brand_name, alternative_brand_name, category_id)
 
-    # 종료
-    browser.quit()
+        json_data = json.dumps(data_list, ensure_ascii=False, indent=4)
+        filename = f"{brand_name}_data.json"
+        with open(filename, 'w', encoding='utf-8') as file:
+            file.write(json_data)
+        print(f"Data for {brand_name} saved to {filename}")
 
-    # JSON 데이터 저장
-    json_data = json.dumps(data_list, ensure_ascii=False, indent=4)
-    print(json_data)
-    with open('products.json', 'w', encoding='utf-8') as file:
-        file.write(json_data)
-
-# 프로그램 실행
 if __name__ == '__main__':
-    main()
-
-
-
-
-
-
-
+    brand_file_path = 'brands.json'
+    category_id = '320300600'
+    main(brand_file_path, category_id)
