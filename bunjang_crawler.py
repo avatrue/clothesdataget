@@ -135,6 +135,6 @@ def main(brand_file_path, category_id):
         print(f"Data for {brand_name} saved to {filename}")
 
 if __name__ == '__main__':
-    brand_file_path = 'brands.json'
+    brand_file_path = 'brands_test.json'
     category_id = '320300600'
     main(brand_file_path, category_id)
